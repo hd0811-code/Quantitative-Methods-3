@@ -1,0 +1,353 @@
+---
+title: "Moderation Analysis: Schooling × Fossil-fuel share of Electricity"
+author: "Yunting Du"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: readable
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 7
+)
+library(here)
+dir.create(here("output"), showWarnings = FALSE, recursive = TRUE)
+```
+# Packages
+```{r}
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(car)
+library(sandwich)
+library(lmtest)
+library(stargazer)
+library(DescTools)
+library(interactions)
+library(knitr)
+library(here)
+```
+
+# Paths
+```{r}
+path_energy <- here("owid-energy-data.csv")
+path_co2    <- here("owid-co2-data.csv")
+path_school <- here("average_years_of_schooling.csv")
+path_gdp    <- here("GDP_per_capita.csv")
+
+target_year <- 2023
+```
+
+```{r}
+energy <- read_csv(path_energy)
+co2    <- read_csv(path_co2)
+school <- read_csv(path_school)
+gdp    <- read_csv(path_gdp)
+```
+# Data cleaning
+## Fossilfuel share data
+```{r}
+fossil_share_elec <- read_csv(path_energy, show_col_types = FALSE)
+
+fossil_share_elec_2023 <- fossil_share_elec %>%
+filter(nchar(iso_code) == 3, year == target_year) %>%
+select(country, iso_code, year, fossil_share_elec)
+
+head(fossil_share_elec_2023)
+
+write_csv(
+fossil_share_elec_2023,
+here("output", paste0("owid-fossil-data-cleaned-", target_year, ".csv"))
+)
+```
+## CO2 per capita data
+```{r}
+co2pc <- read_csv(path_co2, show_col_types = FALSE)
+
+co2_per_capita_2023 <- co2pc %>%
+filter(nchar(iso_code) == 3, year == target_year) %>%
+select(country, iso_code, year, co2_per_capita)
+
+head(co2_per_capita_2023)
+
+write_csv(
+co2_per_capita_2023,
+here("output", paste0("owid-co2pc-data-cleaned-", target_year, ".csv"))
+)
+```
+## Mean years of schooling data
+```{r}
+schooling_2023 <- read_csv(path_school, show_col_types = FALSE) %>%
+transmute(
+country   = Entity,
+iso_code  = iso_code,
+year      = year,
+schooling = as.numeric(schooling)
+) %>%
+filter(nchar(iso_code) == 3, year == target_year)
+
+head(schooling_2023)
+
+write_csv(
+schooling_2023,
+here("output", paste0("schooling-cleaned-", target_year, ".csv"))
+)
+```
+## GDP per capita data
+```{r}
+lines <- readLines(path_gdp, n = 300, warn = FALSE)
+header_line <- which(grepl("Country Name", lines, fixed = TRUE))[1]
+
+gdp_raw <- read_csv(path_gdp, skip = header_line - 1, show_col_types = FALSE)
+
+year_idx <- match(as.character(target_year), names(gdp_raw))
+if (is.na(year_idx)) stop("Year column not found. Please check if this file contains the target year.")
+
+gdp_country_2023 <- tibble(
+country = gdp_raw[[1]],
+iso_code = gdp_raw[[2]],
+year = target_year,
+gdp_per_capita = as.numeric(gdp_raw[[year_idx]])
+) %>%
+filter(nchar(iso_code) == 3)
+
+head(gdp_country_2023)
+
+write_csv(
+gdp_country_2023,
+here("output", paste0("gdp-per-capita-cleaned-", target_year, ".csv"))
+)
+```
+# Data merging
+```{r}
+merged_yr <- fossil_share_elec_2023 %>%
+left_join(
+co2_per_capita_2023 %>% select(iso_code, year, co2_per_capita),
+by = c("iso_code", "year")
+) %>%
+left_join(
+schooling_2023 %>% select(iso_code, year, schooling),
+by = c("iso_code", "year")
+) %>%
+left_join(
+gdp_country_2023 %>% select(iso_code, year, gdp_per_capita),
+by = c("iso_code", "year")
+) %>%
+drop_na(fossil_share_elec, co2_per_capita, schooling, gdp_per_capita)
+head(merged_yr)
+
+write_csv(
+merged_yr,
+here("output", paste0("merged_dataset_", target_year, "_complete_cases.csv"))
+)
+```
+# Descriptive statistics
+```{r}
+df_desc <- merged_yr %>%
+select(fossil_share_elec, co2_per_capita, schooling, gdp_per_capita) %>%
+na.omit()
+
+cat("Number of observations:", nrow(df_desc), "\n\n")
+
+summary(df_desc)
+```
+## Boxplots
+```{r}
+op <- par(no.readonly = TRUE)
+par(mfrow = c(2, 2), mar = c(4, 4, 5, 2), oma = c(0, 0, 2, 0))
+
+boxplot(
+df_desc$fossil_share_elec,
+main = expression(bold(atop("Fossil Fuel Share of Electricity", "(%) Across Countries in 2023"))),
+ylab = expression(bold("Fossil Fuel Share (%)")),
+col = "lightblue"
+)
+
+boxplot(
+df_desc$co2_per_capita,
+main = expression(bold(atop(CO[2]~"Emissions per Capita", "(Tonnes per Capita) in 2023"))),
+ylab = expression(bold(CO[2]~"Emissions (Tonnes)")),
+col = "lightblue"
+)
+
+boxplot(
+df_desc$schooling,
+main = expression(bold(atop("Mean Years of Schooling", "(Years) Across Countries in 2023"))),
+ylab = expression(bold("Schooling (Years)")),
+col = "lightblue"
+)
+
+boxplot(
+df_desc$gdp_per_capita,
+main = expression(bold(atop("GDP per Capita", "(US$ per Capita) in 2023"))),
+ylab = expression(bold("GDP per Capita (US$)")),
+col = "lightblue"
+)
+
+mtext("Descriptive Statistics: Distribution of Variables", outer = TRUE, cex = 1.2, font = 2)
+par(op)
+```
+## Correlation matrix
+```{r}
+cor_matrix <- round(
+cor(df_desc, use = "pairwise.complete.obs"),
+3
+)
+
+kable(cor_matrix, caption = "Correlation Matrix (2023)")
+```
+## Scatterplot matrix
+```{r}
+panel.lm <- function(x, y, ...) {
+points(x, y, pch = 16, col = rgb(0.27, 0.51, 0.71, alpha = 0.6))
+abline(lm(y ~ x), col = "red", lty = 2, lwd = 1.5)
+}
+
+pairs(
+df_desc,
+upper.panel = panel.lm,
+lower.panel = panel.lm,
+labels = c(
+"Fossil Share\n(%)",
+expression(CO[2]~"\n(Tonnes)"),
+"Schooling\n(Years)",
+"GDP per Cap\n(US$)"
+),
+main = "Scatterplot Matrix with Linear Trend Lines"
+)
+```
+
+# Modelling
+## Winsor function and model dataframe
+```{r}
+winsor <- function(x, probs = c(0.01, 0.99)) {
+qs <- quantile(x, probs = probs, na.rm = TRUE, type = 7)
+pmin(pmax(x, qs[1]), qs[2])
+}
+
+df_model <- merged_yr %>%
+transmute(
+fossil_share = as.numeric(fossil_share_elec),
+co2_pc       = as.numeric(co2_per_capita),
+schooling    = as.numeric(schooling),
+gdp_pc       = as.numeric(gdp_per_capita)
+) %>%
+filter(complete.cases(fossil_share, co2_pc, schooling, gdp_pc)) %>%
+mutate(
+co2_pc_w = winsor(co2_pc, probs = c(0.01, 0.99)),
+co2_shift = ifelse(min(co2_pc_w, na.rm = TRUE) <= 0,
+abs(min(co2_pc_w, na.rm = TRUE)) + 1e-6, 0),
+ln_co2_pc = log(co2_pc_w + co2_shift),
+ln_gdp = log(gdp_pc),
+fossil_share_c = fossil_share - mean(fossil_share, na.rm = TRUE),
+schooling_c    = schooling    - mean(schooling, na.rm = TRUE)
+)
+```
+## Three models
+```{r}
+m1 <- lm(ln_co2_pc ~ fossil_share_c + ln_gdp, data = df_model)
+m2 <- lm(ln_co2_pc ~ fossil_share_c + ln_gdp + schooling_c, data = df_model)
+m3 <- lm(ln_co2_pc ~ fossil_share_c + ln_gdp + schooling_c + fossil_share_c:schooling_c,data = df_model)
+```
+## Robust standard errors (HC1)
+```{r}
+se_m1_robust <- sqrt(diag(vcovHC(m1, type = "HC1")))[names(coef(m1))]
+se_m2_robust <- sqrt(diag(vcovHC(m2, type = "HC1")))[names(coef(m2))]
+se_m3_robust <- sqrt(diag(vcovHC(m3, type = "HC1")))[names(coef(m3))]
+```
+## Regression table
+```{r stargazer-table, results='asis', echo=TRUE}
+stargazer(
+  m1, m2, m3,
+  type = "html",
+  title = "<span style='color: black; font-weight: bold;'> Table 2. Regression results of three models",
+  dep.var.labels = "log(CO2 emissions per capita)",
+  se = list(se_m1_robust, se_m2_robust, se_m3_robust),
+  digits = 3,
+  model.numbers = TRUE,
+  order = c("fossil_share_c", "ln_gdp", "schooling_c", "fossil_share_c:schooling_c"),
+  covariate.labels = c(
+    "Fossil fuel share of electricity (centered)",
+    "log(GDP per capita)",
+    "Average years of schooling (centered)",
+    "Fossil share × Schooling"
+  ),
+  notes.append = FALSE,
+  notes = "Significance levels: * p < 0.05; ** p < 0.01; *** p < 0.001. <br> Robust standard errors (HC1) in parentheses.",
+  header = FALSE
+)
+```
+## Simple slope analysis
+```{r simple-slopes, echo=TRUE}
+s_slopes <- sim_slopes(
+  model = m3,
+  pred  = "fossil_share_c",
+  modx  = "schooling_c",
+  johnson_neyman = TRUE,
+  cond.int = TRUE,
+  robust = TRUE
+)
+print(s_slopes)
+
+cat("### Table 3a: Simple Slopes (4-digit precision)\n")
+s_slopes$slopes %>%
+  as.data.frame() %>%
+  kable(digits = 4, caption = "Slopes of fossil_share_c at different schooling levels")
+```
+## Interaction Plot
+```{r interaction-plot, echo=TRUE, fig.height=7, fig.width=9}
+interact_plot(
+  model = m3,
+  pred  = "fossil_share_c",
+  modx  = "schooling_c",
+  interval = TRUE,
+  plot.points = TRUE,
+  point.alpha = 0.3,
+  x.label = "Fossil fuel share of electricity (centered)",
+  y.label = "log(CO2 emissions per capita)",
+  main.title = "Interaction: Schooling x Fossil Share (log CO2)"
+)
+```
+
+# Model diagnostics
+```{r}
+par(mfrow = c(2, 2), mar = c(4.5, 4.5, 3, 2), oma = c(0, 0, 2, 0))
+plot(
+m3,
+pch = 20,
+col = rgb(120/255, 170/255, 215/255, alpha = 0.7),
+lwd = 1.5,
+sub.caption = ""
+)
+mtext("Regression Diagnostics for Moderation Model (log CO2)", outer = TRUE, cex = 1.2, font = 2)
+par(mfrow = c(1, 1))
+```
+# VIF and model comparison
+```{r}
+vif_m3 <- vif(m3)
+vif_m2 <- vif(m2)
+vif_comparison <- data.frame(
+Variable = names(vif_m3),
+VIF_with_Interaction = as.numeric(vif_m3),
+VIF_without_Interaction = as.numeric(vif_m2[names(vif_m3)])
+)
+
+kable(vif_comparison, digits = 3, caption = "VIF Comparison (with vs without interaction)")
+```
+# F-test (Model 2 vs Model 3)
+```{r}
+f_test_m2_m3 <- anova(m2, m3)
+kable(f_test_m2_m3, caption = "F-test: Compare Model 2 vs Model 3")
+```
+
